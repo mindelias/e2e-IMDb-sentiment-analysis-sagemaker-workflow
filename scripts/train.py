@@ -1,10 +1,26 @@
 import os
-import joblib
+import argparse
 import pandas as pd
 import xgboost as xgb
-from sagemaker_training import environment
+import subprocess
+import sys
+
+
+def install_packages():
+    """Install required packages at runtime"""
+    packages = ['sagemaker-training']
+    for package in packages:
+        subprocess.check_call([sys.executable, "-m", "pip", "install", package])
 
 def main():
+    
+   # Install required packages first
+    print("🔧 Installing required packages...")
+    install_packages()
+    
+    # Now import sagemaker_training AFTER installation
+    from sagemaker_training import environment
+    
     env = environment.Environment()
     
     # Load data
