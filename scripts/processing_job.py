@@ -2,132 +2,115 @@ import os
 import argparse
 import pandas as pd
 import joblib
+import re
+import sys
+import subprocess
 from sklearn.feature_extraction.text import CountVectorizer
 from sklearn.model_selection import train_test_split
-from scripts.preprocessing import review_to_words  # Custom cleaning functions
 
-def load_dataset(path):
-    """
-    Load raw reviews from directory structure
-    - path: Directory with 'pos' and 'neg' subfolders
-    Returns: DataFrame with columns ['review', 'sentiment']
-    """
-    reviews = []
-    # 1 = Positive, 0 = Negative
-    for label, sentiment in [('pos', 1), ('neg', 0)]:
-        folder = os.path.join(path, label)
-        # Process each review file
-        for filename in os.listdir(folder):
-            with open(os.path.join(folder, filename), 'r', encoding='utf-8') as f:
-                reviews.append([f.read(), sentiment])
-    return pd.DataFrame(reviews, columns=['review', 'sentiment'])
+# Install required packages at runtime
+def install_packages():
+    packages = ['beautifulsoup4==4.12.3', 'nltk==3.8.1']
+    for package in packages:
+        subprocess.check_call([sys.executable, "-m", "pip", "install", package])
+
+
+
+# Define the text cleaning function directly in this script
+def review_to_words(review):
+    # Import inside function to ensure packages are installed first
+    from bs4 import BeautifulSoup
+    from nltk.corpus import stopwords
+    from nltk.stem import PorterStemmer
+    
+    """Convert a raw review string into a cleaned word list"""
+    # 1. Remove HTML tags
+    text = BeautifulSoup(review, "html.parser").get_text()
+    
+    # 2. Keep only letters/numbers and convert to lowercase
+    text = re.sub(r"[^a-zA-Z0-9]", " ", text.lower())
+    
+    # 3. Split into individual words
+    words = text.split()
+    
+    # 4. Remove common stopwords
+    stop_words = set(stopwords.words("english"))
+    words = [w for w in words if w not in stop_words]
+    
+    # 5. Reduce words to their root form
+    stemmer = PorterStemmer()
+    words = [stemmer.stem(w) for w in words]
+    
+    return " ".join(words)  
+
 
 if __name__ == "__main__":
-    # SageMaker passes these paths automatically
+    # Install packages before anything else
+    print("🔧 Installing required packages...")
+    install_packages()
+
+    # Download NLTK data
+    print("📥 Downloading NLTK data...")
+    import nltk
+    nltk.download('stopwords')
+    
     parser = argparse.ArgumentParser()
     parser.add_argument('--input-data', type=str, default='/opt/ml/processing/input/data')
     parser.add_argument('--output-data', type=str, default='/opt/ml/processing/output')
     args = parser.parse_args()
 
-    # 1. LOAD RAW DATA ---------------------------------------------------------
-    # Original dataset structure:
-    #   input-data/
-    #     train/pos/*.txt  - 12,500 positive reviews
-    #     train/neg/*.txt  - 12,500 negative reviews
-    #     test/pos/*.txt   - 12,500 positive reviews
-    #     test/neg/*.txt   - 12,500 negative reviews
-    
-    train_df = load_dataset(os.path.join(args.input_data, 'train'))  # 25,000 reviews
-    test_df = load_dataset(os.path.join(args.input_data, 'test'))    # 25,000 reviews
 
-    # 2. CLEAN TEXT ------------------------------------------------------------
-    # Apply the same cleaning to all reviews
+    
+
+    # 1. LOAD PREPROCESSED CSV ---------------------------------------------------
+    print("📥 Loading CSV files...")
+    train_df = pd.read_csv(os.path.join(args.input_data, 'train.csv'))  # ['review', 'sentiment']
+    test_df = pd.read_csv(os.path.join(args.input_data, 'test.csv'))    # ['review', 'sentiment']
+
+    # 2. CLEAN TEXT -------------------------------------------------------------
+    print("🧹 Cleaning text...")
     train_df['cleaned_review'] = train_df['review'].apply(review_to_words)
     test_df['cleaned_review'] = test_df['review'].apply(review_to_words)
 
-    # 3. SPLIT DATA PROPERLY --------------------------------------------------
-    # Best practice:
-    #   - Train: Model training (80% of total training data)
-    #   - Validation: Hyperparameter tuning (20% of total training data)
-    #   - Test: Final evaluation (100% of original test set)
-    
-    # Split ORIGINAL TRAINING DATA into train/validation
+    # 3. SPLIT INTO TRAIN/VALIDATION -------------------------------------------
+    print("✂️ Splitting train into train/validation...")
     train_data, val_data = train_test_split(
-        train_df, 
-        test_size=0.2,  # 20% for validation
+        train_df,
+        test_size=0.2,
         random_state=42,
-        stratify=train_df['sentiment']  # Maintain class balance
+        stratify=train_df['sentiment']
     )
-    # test_df remains untouched for final evaluation
 
-    # 4. VECTORIZE TEXT -------------------------------------------------------
-    # Critical: Fit ONLY on training data to avoid data leakage
-    vectorizer = CountVectorizer(
-        max_features=5000,  # Use top 5000 words
-        binary=True         # Use 1/0 (present/absent) instead of counts
-    )
-    
-    # Learn vocabulary ONLY from training split
+    # 4. VECTORIZE --------------------------------------------------------------
+    print("🧠 Fitting vectorizer...")
+    vectorizer = CountVectorizer(max_features=5000, binary=True)
     X_train = vectorizer.fit_transform(train_data['cleaned_review'])
-    # Apply SAME transformation to other datasets
     X_val = vectorizer.transform(val_data['cleaned_review'])
     X_test = vectorizer.transform(test_df['cleaned_review'])
 
-    # 5. CREATE FINAL DATASETS ------------------------------------------------
-    # Combine labels with features
-    train_processed = pd.concat([
-        pd.DataFrame(train_data['sentiment'].values, columns=['sentiment']),
-        pd.DataFrame(X_train.toarray())
-    ], axis=1)
-    
-    val_processed = pd.concat([
-        pd.DataFrame(val_data['sentiment'].values, columns=['sentiment']),
-        pd.DataFrame(X_val.toarray())
-    ], axis=1)
-    
-    test_processed = pd.concat([
-        pd.DataFrame(test_df['sentiment'].values, columns=['sentiment']),
-        pd.DataFrame(X_test.toarray())
-    ], axis=1)
+    # 5. PREPARE FINAL DATASETS -------------------------------------------------
+    print("📦 Preparing final datasets...")
+    def combine(X, y):
+        return pd.concat([
+            pd.DataFrame(y.values, columns=['sentiment']),
+            pd.DataFrame(X.toarray())
+        ], axis=1)
 
-    # 6. SAVE PROCESSED DATA --------------------------------------------------
-    # SageMaker requires specific directory structure
+    train_processed = combine(X_train, train_data['sentiment'])
+    val_processed = combine(X_val, val_data['sentiment'])
+    test_processed = combine(X_test, test_df['sentiment'])
+
+    # 6. SAVE OUTPUTS -----------------------------------------------------------
+    print("💾 Saving outputs...")
     os.makedirs(f'{args.output_data}/train', exist_ok=True)
     os.makedirs(f'{args.output_data}/validation', exist_ok=True)
     os.makedirs(f'{args.output_data}/test', exist_ok=True)
     os.makedirs(f'{args.output_data}/vectorizer', exist_ok=True)
-    
-    # Save without headers/index (XGBoost requirement)
-    train_processed.to_csv(
-        f'{args.output_data}/train/train.csv', 
-        index=False, 
-        header=False
-    )
-    val_processed.to_csv(
-        f'{args.output_data}/validation/validation.csv', 
-        index=False, 
-        header=False
-    )
-    test_processed.to_csv(
-        f'{args.output_data}/test/test.csv', 
-        index=False, 
-        header=False
-    )
-    
-    # MUST SAVE VECTORIZER FOR CONSISTENT INFERENCE
+
+    train_processed.to_csv(f'{args.output_data}/train/train.csv', index=False, header=False)
+    val_processed.to_csv(f'{args.output_data}/validation/validation.csv', index=False, header=False)
+    test_processed.to_csv(f'{args.output_data}/test/test.csv', index=False, header=False)
+
     joblib.dump(vectorizer, f'{args.output_data}/vectorizer/vectorizer.joblib')
-    print(f"✅ Processing complete. Vocabulary size: {len(vectorizer.vocabulary_)}")
 
-
-
-
-
-
-
-
-
-
-
-
-
-
+    print(f"✅ Done! Vectorizer vocab size: {len(vectorizer.vocabulary_)}")
